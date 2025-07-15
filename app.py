@@ -87,19 +87,29 @@ class RealTimeS2SAgent:
         print(f"Agent: {agent_response}")
         await self._send_json(websocket, {"type": "transcription_agent", "data": agent_response})
 
+        # --- THE DEFINITIVE TTS FIX ---
         await self._send_json(websocket, {"type": "status", "data": "Speaking..."})
-        chunks = self.tts_model.tts(text=agent_response, speaker="Claribel Dervla", language="en", stream=True)
-        for chunk in chunks:
-            encoded_chunk = base64.b64encode(chunk.cpu().numpy().tobytes()).decode('utf-8')
+        
+        # 1. Generate the entire audio clip in one go on the backend.
+        #    We call tts() WITHOUT the `stream=True` argument to bypass the internal bug.
+        wav_chunk = self.tts_model.tts(text=agent_response, speaker="Claribel Dervla", language="en")
+        
+        # 2. Manually stream the complete audio data to the client in chunks.
+        #    This gives a responsive feel and works with the existing frontend queue.
+        audio_bytes = np.array(wav_chunk).tobytes()
+        chunk_size = 4096  # Send audio in 4KB chunks
+        for i in range(0, len(audio_bytes), chunk_size):
+            chunk = audio_bytes[i:i + chunk_size]
+            encoded_chunk = base64.b64encode(chunk).decode('utf-8')
             await self._send_json(websocket, {"type": "audio_chunk", "data": encoded_chunk})
+
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
 
     async def _log_ffmpeg_stderr(self, stderr):
         """Continuously read and log ffmpeg's error stream."""
         while True:
             line = await stderr.readline()
-            if not line:
-                break
+            if not line: break
             print(f"[ffmpeg stderr] {line.decode().strip()}")
 
     async def handle_audio_stream(self, websocket: WebSocket):
@@ -113,25 +123,15 @@ class RealTimeS2SAgent:
         is_speaking = False
 
         ffmpeg_command = [
-            "ffmpeg",
-            '-hide_banner', '-loglevel', 'error',
-            '-f', 'webm',
-            '-i', 'pipe:0',
-            '-f', 's16le',
-            '-ar', '16000',
-            '-ac', '1',
-            '-fflags', 'nobuffer',
-            '-probesize', '32',
-            'pipe:1'
+            "ffmpeg", '-hide_banner', '-loglevel', 'error', '-f', 'webm', '-i', 'pipe:0',
+            '-f', 's16le', '-ar', '16000', '-ac', '1', '-fflags', 'nobuffer',
+            '-probesize', '32', 'pipe:1'
         ]
         
         ffmpeg_process = await asyncio.create_subprocess_exec(
-            *ffmpeg_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            *ffmpeg_command, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-
         stderr_logger_task = asyncio.create_task(self._log_ffmpeg_stderr(ffmpeg_process.stderr))
 
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
@@ -139,7 +139,6 @@ class RealTimeS2SAgent:
         try:
             while True:
                 webm_chunk = await websocket.receive_bytes()
-                
                 if ffmpeg_process.stdin:
                     ffmpeg_process.stdin.write(webm_chunk)
                     await ffmpeg_process.stdin.drain()
@@ -147,11 +146,8 @@ class RealTimeS2SAgent:
                 while True:
                     try:
                         pcm_chunk = await asyncio.wait_for(ffmpeg_process.stdout.read(self.chunk_size * 2), timeout=0.01)
-                        if not pcm_chunk:
-                            break
-                        
-                        if len(pcm_chunk) != self.chunk_size * 2:
-                            continue
+                        if not pcm_chunk: break
+                        if len(pcm_chunk) != self.chunk_size * 2: continue
 
                         is_speech = self.vad.is_speech(pcm_chunk, self.sample_rate)
                         
@@ -182,7 +178,11 @@ class RealTimeS2SAgent:
         finally:
             print("Cleaning up ffmpeg process...")
             if ffmpeg_process.stdin:
-                ffmpeg_process.stdin.close()
+                try:
+                    ffmpeg_process.stdin.close()
+                    await ffmpeg_process.stdin.wait_closed()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass # Expected errors when client disconnects
             if ffmpeg_process.returncode is None:
                 ffmpeg_process.kill()
             await ffmpeg_process.wait()
