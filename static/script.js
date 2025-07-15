@@ -15,6 +15,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let stream;
     let pcmBuffer = [];
 
+    // --- THE DEFINITIVE FIX ---
+    // The TTS model outputs audio at 24kHz. We MUST initialize our AudioContext
+    // to the same sample rate to prevent silent playback failures.
+    const TTS_SAMPLE_RATE = 24000;
+
     const updateStatus = (text, indicatorClass) => {
         statusText.textContent = text;
         statusIndicator.className = 'status-indicator';
@@ -32,7 +37,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const createWavFile = (pcmData) => {
-        const sampleRate = 24000; // XTTS-v2 sample rate
+        const sampleRate = TTS_SAMPLE_RATE;
         const numChannels = 1;
         const bitsPerSample = 16;
         const dataSize = pcmData.byteLength;
@@ -94,8 +99,12 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStatus("Connecting...", "thinking");
 
         try {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000 } });
+            // Initialize AudioContext with the correct sample rate to match our TTS model
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: TTS_SAMPLE_RATE
+            });
+
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
