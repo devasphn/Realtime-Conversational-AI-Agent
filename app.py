@@ -12,7 +12,6 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 import webrtcvad
-
 from collections import deque
 
 # --- FastAPI App Initialization ---
@@ -104,7 +103,6 @@ class RealTimeS2SAgent:
             print(f"[ffmpeg stderr] {line.decode().strip()}")
 
     async def handle_audio_stream(self, websocket: WebSocket):
-        # VAD state variables
         silence_threshold_ms = 700
         padding_ms = 200
         num_padding_chunks = padding_ms // self.frame_duration
@@ -114,22 +112,19 @@ class RealTimeS2SAgent:
         voiced_frames = []
         is_speaking = False
 
-        # --- THE CORRECTED FFMPEG PIPE ---
-        # These flags are critical for forcing ffmpeg into a low-latency streaming mode.
         ffmpeg_command = [
             "ffmpeg",
-            '-hide_banner', '-loglevel', 'error', # Suppress verbose logs, only show errors
-            '-f', 'webm',          # Explicitly tell ffmpeg the input format is webm
-            '-i', 'pipe:0',        # Input from stdin
-            '-f', 's16le',         # Output format: signed 16-bit little-endian (raw PCM)
-            '-ar', '16000',        # Output sample rate: 16kHz
-            '-ac', '1',            # Output channels: 1 (mono)
-            '-fflags', 'nobuffer', # Reduce buffer delay on the output
-            '-probesize', '32',    # Don't spend time probing the input, start immediately
-            'pipe:1'               # Output to stdout
+            '-hide_banner', '-loglevel', 'error',
+            '-f', 'webm',
+            '-i', 'pipe:0',
+            '-f', 's16le',
+            '-ar', '16000',
+            '-ac', '1',
+            '-fflags', 'nobuffer',
+            '-probesize', '32',
+            'pipe:1'
         ]
         
-        # Create the subprocess
         ffmpeg_process = await asyncio.create_subprocess_exec(
             *ffmpeg_command,
             stdin=asyncio.subprocess.PIPE,
@@ -137,7 +132,6 @@ class RealTimeS2SAgent:
             stderr=asyncio.subprocess.PIPE
         )
 
-        # Start a background task to log any errors from ffmpeg
         stderr_logger_task = asyncio.create_task(self._log_ffmpeg_stderr(ffmpeg_process.stderr))
 
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
@@ -150,7 +144,6 @@ class RealTimeS2SAgent:
                     ffmpeg_process.stdin.write(webm_chunk)
                     await ffmpeg_process.stdin.drain()
 
-                # Read all available data from ffmpeg's stdout without blocking
                 while True:
                     try:
                         pcm_chunk = await asyncio.wait_for(ffmpeg_process.stdout.read(self.chunk_size * 2), timeout=0.01)
@@ -180,7 +173,7 @@ class RealTimeS2SAgent:
                                     voice_buffer.clear()
                                     padding_buffer.clear()
                     except asyncio.TimeoutError:
-                        break # No more data from ffmpeg at this moment
+                        break
         
         except WebSocketDisconnect:
             print("Client disconnected.")
@@ -196,7 +189,6 @@ class RealTimeS2SAgent:
             stderr_logger_task.cancel()
             print("ffmpeg process cleaned up.")
 
-# Instantiate the agent once
 agent = RealTimeS2SAgent()
 
 @app.get("/")
