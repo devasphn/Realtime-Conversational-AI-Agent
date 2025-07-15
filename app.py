@@ -6,9 +6,8 @@ import numpy as np
 import os
 import asyncio
 import base64
-import io
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -31,7 +30,7 @@ class RealTimeS2SAgent:
         # VAD Initialization
         self.vad = webrtcvad.Vad(3)
         self.sample_rate = 16000
-        self.frame_duration = 30 # ms
+        self.frame_duration = 30  # ms
         self.chunk_size = int(self.sample_rate * self.frame_duration / 1000)
 
         # STT Model
@@ -56,7 +55,10 @@ class RealTimeS2SAgent:
         print("\n--- Agent is Ready ---")
 
     async def _send_json(self, websocket: WebSocket, data: dict):
-        await websocket.send_json(data)
+        try:
+            await websocket.send_json(data)
+        except Exception:
+            pass # Client might have disconnected
 
     async def _process_s2s_pipeline(self, websocket: WebSocket, audio_data: bytes):
         await self._send_json(websocket, {"type": "status", "data": "Transcribing..."})
@@ -93,59 +95,71 @@ class RealTimeS2SAgent:
             await self._send_json(websocket, {"type": "audio_chunk", "data": encoded_chunk})
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
 
-    def _convert_audio(self, webm_data: bytes) -> bytes:
-        """Converts WebM/Opus audio data from browser to raw PCM for VAD."""
-        try:
-            audio = AudioSegment.from_file(io.BytesIO(webm_data), format="webm")
-            audio = audio.set_frame_rate(self.sample_rate).set_channels(1).set_sample_width(2)
-            return audio.raw_data
-        except Exception as e:
-            print(f"Pydub conversion error: {e}")
-            return b''
-
     async def handle_audio_stream(self, websocket: WebSocket):
+        # VAD state variables
         silence_threshold_ms = 700
         padding_ms = 200
         num_padding_chunks = padding_ms // self.frame_duration
         num_silence_chunks = silence_threshold_ms // self.frame_duration
-
         voice_buffer = deque(maxlen=num_silence_chunks)
         padding_buffer = deque(maxlen=num_padding_chunks)
-        
         voiced_frames = []
         is_speaking = False
 
+        # --- THE FFMPEG PIPE ---
+        # This command reads WebM/Opus from stdin and outputs raw 16kHz 16-bit mono PCM to stdout
+        ffmpeg_command = [
+            "ffmpeg",
+            "-i", "pipe:0",      # Input from stdin
+            "-f", "s16le",       # Format: signed 16-bit little-endian (raw PCM)
+            "-ar", "16000",      # Audio sample rate: 16kHz
+            "-ac", "1",          # Audio channels: 1 (mono)
+            "pipe:1"             # Output to stdout
+        ]
+        
+        # Create the subprocess
+        ffmpeg_process = await asyncio.create_subprocess_exec(
+            *ffmpeg_command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE  # Capture stderr to see ffmpeg logs
+        )
+
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
 
-        while True:
-            try:
-                webm_data = await websocket.receive_bytes()
-                
-                # **THE CRITICAL FIX IS HERE**
-                # Convert the incoming webm audio to raw PCM before processing
-                pcm_data = await asyncio.to_thread(self._convert_audio, webm_data)
+        try:
+            while True:
+                # 1. Get audio from browser
+                webm_chunk = await websocket.receive_bytes()
 
-                if not pcm_data:
-                    continue
+                # 2. Write it to ffmpeg's stdin
+                if ffmpeg_process.stdin:
+                    ffmpeg_process.stdin.write(webm_chunk)
+                    await ffmpeg_process.stdin.drain()
 
-                # Now, process the raw PCM data in chunks for the VAD
-                for i in range(0, len(pcm_data), self.chunk_size * 2): # 2 bytes per sample
-                    chunk = pcm_data[i:i + self.chunk_size * 2]
-                    if len(chunk) != self.chunk_size * 2:
-                        continue # Skip incomplete chunks
+                # 3. Read the converted PCM data from ffmpeg's stdout
+                # We expect a certain amount of data based on the input, but we'll read what's available
+                while True:
+                    pcm_chunk = await ffmpeg_process.stdout.read(self.chunk_size * 2) # Read one frame's worth
+                    if not pcm_chunk:
+                        break # No more data from ffmpeg for this input chunk
 
-                    is_speech = self.vad.is_speech(chunk, self.sample_rate)
+                    # 4. Process the clean PCM chunk with the VAD
+                    if len(pcm_chunk) != self.chunk_size * 2:
+                        continue # Skip incomplete frames
+
+                    is_speech = self.vad.is_speech(pcm_chunk, self.sample_rate)
                     
                     if is_speech:
                         if not is_speaking:
                             is_speaking = True
                             voiced_frames.extend([f for f, _ in padding_buffer])
-                        voiced_frames.append(chunk)
+                        voiced_frames.append(pcm_chunk)
                         voice_buffer.clear()
                     else:
-                        padding_buffer.append((chunk, is_speech))
+                        padding_buffer.append((pcm_chunk, is_speech))
                         if is_speaking:
-                            voice_buffer.append(chunk)
+                            voice_buffer.append(pcm_chunk)
                             if len(voice_buffer) >= num_silence_chunks:
                                 is_speaking = False
                                 audio_data = b''.join(voiced_frames)
@@ -153,10 +167,19 @@ class RealTimeS2SAgent:
                                 voiced_frames.clear()
                                 voice_buffer.clear()
                                 padding_buffer.clear()
-            except Exception as e:
-                print(f"Connection closed or error: {e}")
-                break
+        
+        except WebSocketDisconnect:
+            print("Client disconnected.")
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+        finally:
+            print("Cleaning up ffmpeg process...")
+            if ffmpeg_process.returncode is None:
+                ffmpeg_process.kill()
+            await ffmpeg_process.wait()
+            print("ffmpeg process cleaned up.")
 
+# Instantiate the agent once
 agent = RealTimeS2SAgent()
 
 @app.get("/")
