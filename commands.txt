@@ -1,0 +1,29 @@
+# 1. Clone your new repository
+cd /workspace
+git clone https://github.com/devasphn/Realtime-Conversational-AI-Agent.git
+cd Realtime-Conversational-AI-Agent/
+
+# 2. Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 3. Install necessary system packages
+apt-get update
+apt-get install -y libsndfile1 ffmpeg build-essential git-lfs libcudnn8 portaudio19-dev
+
+# 4. Install Python dependencies from the new requirements file
+pip install -r requirements.txt
+
+# 5. Install the latest version of transformers from source
+pip install git+https://github.com/huggingface/transformers.git
+
+# 6. (Optional but recommended) Install flash-attn for performance
+pip install flash-attn --no-build-isolation
+
+# 7. Log in to Hugging Face to access Llama-3
+huggingface-cli login
+# -> Paste your token when prompted
+
+# 8. Run the application
+# Uvicorn is the server that runs our FastAPI application.
+uvicorn app:app --host 0.0.0.0 --port 7860
