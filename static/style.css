@@ -1,0 +1,117 @@
+body {
+    background-color: #121212;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    margin: 0;
+}
+
+.container {
+    width: 100%;
+    max-width: 700px;
+    padding: 20px;
+    background-color: #1e1e1e;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+}
+
+h1 {
+    text-align: center;
+    color: #ffffff;
+    margin-top: 0;
+}
+
+.transcript-container {
+    height: 400px;
+    overflow-y: auto;
+    border: 1px solid #333;
+    padding: 15px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    background-color: #2a2a2a;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.transcript-entry {
+    padding: 10px 15px;
+    border-radius: 18px;
+    max-width: 80%;
+    word-wrap: break-word;
+}
+
+.transcript-entry.user {
+    background-color: #3b82f6;
+    color: white;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+}
+
+.transcript-entry.agent {
+    background-color: #4a4a4a;
+    color: #e0e0e0;
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+}
+
+.status-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background-color: #ef4444; /* Red for disconnected */
+    transition: background-color 0.3s;
+}
+
+.status-indicator.listening { background-color: #22c55e; } /* Green */
+.status-indicator.thinking { background-color: #f59e0b; } /* Amber */
+.status-indicator.speaking { background-color: #6366f1; } /* Indigo */
+
+#status-text {
+    font-size: 1rem;
+    color: #a0a0a0;
+}
+
+.controls-container {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+}
+
+button {
+    padding: 12px 24px;
+    font-size: 1rem;
+    font-weight: 500;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.2s, transform 0.1s;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+#start-call-btn { background-color: #22c55e; color: white; }
+#start-call-btn:not(:disabled):hover { background-color: #16a34a; }
+
+#end-call-btn { background-color: #ef4444; color: white; }
+#end-call-btn:not(:disabled):hover { background-color: #dc2626; }
+
+#mute-btn { background-color: #6b7280; color: white; }
+#mute-btn:not(:disabled):hover { background-color: #4b5563; }
+#mute-btn.muted { background-color: #f59e0b; }
