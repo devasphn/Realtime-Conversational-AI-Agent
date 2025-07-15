@@ -89,15 +89,15 @@ class RealTimeS2SAgent:
 
         await self._send_json(websocket, {"type": "status", "data": "Speaking..."})
         
-        # 1. Generate full audio clip from TTS (bypassing its broken internal streaming)
+        # 1. Generate the entire audio clip as a list of floats
         wav_chunks = self.tts_model.tts(text=agent_response, speaker="Claribel Dervla", language="en")
         
-        # 2. Convert float audio to 16-bit PCM bytes
-        audio_array = np.array(wav_chunks, dtype=np.float32)
+        # 2. Convert float audio to 16-bit PCM bytes, the standard WAV format
+        audio_array = np.array(wav_chunks)
         audio_int16 = (audio_array * 32767).astype(np.int16)
         audio_bytes = audio_int16.tobytes()
         
-        # 3. Stream the audio to the client, framed by start/end signals
+        # 3. Stream the audio to the client, framed by start/end signals for WAV assembly
         await self._send_json(websocket, {"type": "audio_start"})
         chunk_size = 4096
         for i in range(0, len(audio_bytes), chunk_size):
@@ -141,7 +141,7 @@ class RealTimeS2SAgent:
         try:
             while True:
                 webm_chunk = await websocket.receive_bytes()
-                if ffmpeg_process.stdin:
+                if ffmpeg_process.stdin and not ffmpeg_process.stdin.is_closing():
                     ffmpeg_process.stdin.write(webm_chunk)
                     await ffmpeg_process.stdin.drain()
 
@@ -179,10 +179,9 @@ class RealTimeS2SAgent:
             print(f"An unexpected error occurred: {e}")
         finally:
             print("Cleaning up ffmpeg process...")
-            if ffmpeg_process.stdin:
+            if ffmpeg_process.stdin and not ffmpeg_process.stdin.is_closing():
                 try:
-                    if not ffmpeg_process.stdin.is_closing():
-                        ffmpeg_process.stdin.close()
+                    ffmpeg_process.stdin.close()
                     await ffmpeg_process.stdin.wait_closed()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
