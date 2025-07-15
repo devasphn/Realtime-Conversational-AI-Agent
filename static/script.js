@@ -13,6 +13,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let isPlaying = false;
     let isMuted = false;
     let stream;
+    let pcmBuffer = [];
 
     const updateStatus = (text, indicatorClass) => {
         statusText.textContent = text;
@@ -30,21 +31,60 @@ document.addEventListener('DOMContentLoaded', () => {
         transcriptContainer.scrollTop = transcriptContainer.scrollHeight;
     };
 
-    const processAudioQueue = async () => {
-        if (audioQueue.length === 0 || isPlaying) {
-            return;
+    const createWavFile = (pcmData) => {
+        const sampleRate = 24000; // XTTS-v2 sample rate
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const dataSize = pcmData.byteLength;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
         }
+
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(view, 8, 'WAVE');
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * numChannels * (bitsPerSample / 8), true);
+        view.setUint16(32, numChannels * (bitsPerSample / 8), true);
+        view.setUint16(34, bitsPerSample, true);
+        writeString(view, 36, 'data');
+        view.setUint32(40, dataSize, true);
+
+        const pcmView = new Uint8Array(pcmData);
+        const dataView = new Uint8Array(buffer, 44);
+        dataView.set(pcmView);
+
+        return buffer;
+    };
+
+    const processAudioQueue = async () => {
+        if (audioQueue.length === 0 || isPlaying) return;
+        
         isPlaying = true;
-        const audioData = audioQueue.shift();
-        const buffer = await audioContext.decodeAudioData(audioData);
-        const source = audioContext.createBufferSource();
-        source.buffer = buffer;
-        source.connect(audioContext.destination);
-        source.start();
-        source.onended = () => {
+        const wavData = audioQueue.shift();
+        try {
+            const buffer = await audioContext.decodeAudioData(wavData);
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.start();
+            source.onended = () => {
+                isPlaying = false;
+                processAudioQueue();
+            };
+        } catch (error) {
+            console.error("Error decoding audio data:", error);
             isPlaying = false;
-            processAudioQueue();
-        };
+        }
     };
 
     const startCall = async () => {
@@ -54,8 +94,8 @@ document.addEventListener('DOMContentLoaded', () => {
         updateStatus("Connecting...", "thinking");
 
         try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate: 16000 } });
             
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -63,39 +103,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
             socket.onopen = () => {
                 console.log("WebSocket connected.");
-                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+                mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+                
                 mediaRecorder.addEventListener('dataavailable', event => {
                     if (event.data.size > 0 && socket.readyState === WebSocket.OPEN && !isMuted) {
-                        // We need to convert the audio blob to raw PCM before sending
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                            // This part is complex, as browser can't easily get raw PCM.
-                            // The backend expects raw 16kHz PCM bytes. We'll send the webm and have the server convert.
-                            // For simplicity in this demo, we will rely on a robust backend to handle it.
-                            // NOTE: The current backend expects raw PCM, which is hard from browser.
-                            // A better approach is to handle webm/opus on server with ffmpeg.
-                            // For this solution, we assume the user has a setup that can send raw audio or the backend handles conversion.
-                            // Let's assume a simplified scenario where we just send the data as is.
-                            // The following is a placeholder for a more complex audio conversion pipeline.
-                            // In a real app, you'd use a WebAssembly library for audio decoding (like opus-decoder).
-                            // Let's send raw bytes and let backend handle it as best it can.
-                            socket.send(event.data);
-                        };
-                        reader.readAsArrayBuffer(event.data);
+                        socket.send(event.data);
                     }
                 });
-                mediaRecorder.start(160); // Send data every 160ms
+                mediaRecorder.start(200); // Send data every 200ms
             };
 
             socket.onmessage = async (event) => {
                 const message = JSON.parse(event.data);
                 switch (message.type) {
                     case 'status':
-                        const indicatorClass = {
-                            "Listening...": "listening",
-                            "Thinking...": "thinking",
-                            "Speaking...": "speaking"
-                        }[message.data] || "";
+                        const indicatorClass = { "Listening...": "listening", "Thinking...": "thinking", "Speaking...": "speaking" }[message.data] || "";
                         updateStatus(message.data, indicatorClass);
                         break;
                     case 'transcription_user':
@@ -104,65 +126,50 @@ document.addEventListener('DOMContentLoaded', () => {
                     case 'transcription_agent':
                         addTranscript(message.data, 'agent');
                         break;
+                    case 'audio_start':
+                        pcmBuffer = [];
+                        break;
                     case 'audio_chunk':
-                        // Decode Base64 audio chunk and add to queue
                         const audioData = atob(message.data);
                         const audioBytes = new Uint8Array(audioData.length);
                         for (let i = 0; i < audioData.length; i++) {
                             audioBytes[i] = audioData.charCodeAt(i);
                         }
-                        // Important: The backend sends PCM float32. We need to wrap it in a WAV header
-                        // or handle it as raw buffer. AudioContext needs a proper format.
-                        // For simplicity, we assume the backend sends playable chunks.
-                        // Here we just push the raw buffer to the queue. This is a simplification.
-                        // A more robust implementation would construct a WAV file in memory.
-                        // Let's assume the browser can handle the raw float32 stream for now.
-                        // The `decodeAudioData` is smart and can often handle raw PCM.
-                        audioQueue.push(audioBytes.buffer);
-                        processAudioQueue();
+                        pcmBuffer.push(audioBytes);
+                        break;
+                    case 'audio_end':
+                        if (pcmBuffer.length === 0) break;
+                        const completePcm = new Blob(pcmBuffer);
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            const wavData = createWavFile(e.target.result);
+                            audioQueue.push(wavData);
+                            processAudioQueue();
+                        };
+                        reader.readAsArrayBuffer(completePcm);
                         break;
                 }
             };
 
-            socket.onclose = () => {
-                console.log("WebSocket disconnected.");
-                endCall();
-            };
-
-            socket.onerror = (error) => {
-                console.error("WebSocket error:", error);
-                endCall();
-            };
+            socket.onclose = () => { console.log("WebSocket disconnected."); endCall(); };
+            socket.onerror = (error) => { console.error("WebSocket error:", error); endCall(); };
 
         } catch (error) {
             console.error("Error starting call:", error);
-            alert("Could not start call. Please ensure you have a microphone and have granted permission.");
+            alert("Could not start call. Check microphone permissions.");
             endCall();
         }
     };
 
     const endCall = () => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
-        }
-        if (socket) {
-            socket.close();
-        }
-        if (stream) {
-            stream.getTracks().forEach(track => track.stop());
-        }
-        if (audioContext) {
-            audioContext.close();
-        }
+        if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+        if (socket) socket.close();
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        if (audioContext && audioContext.state !== 'closed') audioContext.close();
 
-        audioQueue = [];
-        isPlaying = false;
-        startCallBtn.disabled = false;
-        endCallBtn.disabled = true;
-        muteBtn.disabled = true;
-        muteBtn.textContent = 'Mute';
-        muteBtn.classList.remove('muted');
-        isMuted = false;
+        audioQueue = []; pcmBuffer = []; isPlaying = false;
+        startCallBtn.disabled = false; endCallBtn.disabled = true; muteBtn.disabled = true;
+        muteBtn.textContent = 'Mute'; muteBtn.classList.remove('muted'); isMuted = false;
         updateStatus("Disconnected", "");
     };
 
