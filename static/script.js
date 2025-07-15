@@ -110,7 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         socket.send(event.data);
                     }
                 });
-                mediaRecorder.start(200); // Send data every 200ms
+                mediaRecorder.start(200);
             };
 
             socket.onmessage = async (event) => {
@@ -139,14 +139,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         break;
                     case 'audio_end':
                         if (pcmBuffer.length === 0) break;
-                        const completePcm = new Blob(pcmBuffer);
+                        const completePcmBlob = new Blob(pcmBuffer, { type: 'application/octet-stream' });
                         const reader = new FileReader();
                         reader.onload = (e) => {
                             const wavData = createWavFile(e.target.result);
                             audioQueue.push(wavData);
                             processAudioQueue();
                         };
-                        reader.readAsArrayBuffer(completePcm);
+                        reader.readAsArrayBuffer(completePcmBlob);
+                        pcmBuffer = [];
                         break;
                 }
             };
