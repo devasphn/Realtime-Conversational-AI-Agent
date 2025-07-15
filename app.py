@@ -6,6 +6,7 @@ import numpy as np
 import os
 import asyncio
 import base64
+import io
 
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
@@ -13,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 import webrtcvad
 from collections import deque
+from pydub import AudioSegment
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
@@ -27,9 +29,9 @@ class RealTimeS2SAgent:
         print(f"Using device: {self.device.upper()}")
 
         # VAD Initialization
-        self.vad = webrtcvad.Vad(3)  # Aggressiveness level 3
+        self.vad = webrtcvad.Vad(3)
         self.sample_rate = 16000
-        self.frame_duration = 30  # ms
+        self.frame_duration = 30 # ms
         self.chunk_size = int(self.sample_rate * self.frame_duration / 1000)
 
         # STT Model
@@ -57,7 +59,6 @@ class RealTimeS2SAgent:
         await websocket.send_json(data)
 
     async def _process_s2s_pipeline(self, websocket: WebSocket, audio_data: bytes):
-        # 1. Transcribe Audio
         await self._send_json(websocket, {"type": "status", "data": "Transcribing..."})
         audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
         segments, _ = await asyncio.to_thread(self.stt_model.transcribe, audio_np, beam_size=5)
@@ -68,10 +69,9 @@ class RealTimeS2SAgent:
             return
         await self._send_json(websocket, {"type": "transcription_user", "data": user_text})
 
-        # 2. Generate LLM Response
         await self._send_json(websocket, {"type": "status", "data": "Thinking..."})
         messages = [
-            {"role": "system", "content": "You are a friendly and helpful conversational AI. Your name is Deva. Keep your responses concise and to the point."},
+            {"role": "system", "content": "You are a friendly conversational AI named Deva. Keep responses concise."},
             {"role": "user", "content": user_text},
         ]
         terminators = [
@@ -86,19 +86,26 @@ class RealTimeS2SAgent:
         print(f"Agent: {agent_response}")
         await self._send_json(websocket, {"type": "transcription_agent", "data": agent_response})
 
-        # 3. Stream TTS Audio
         await self._send_json(websocket, {"type": "status", "data": "Speaking..."})
-        # Use the streaming feature of the TTS model
         chunks = self.tts_model.tts(text=agent_response, speaker="Claribel Dervla", language="en", stream=True)
         for chunk in chunks:
             encoded_chunk = base64.b64encode(chunk.cpu().numpy().tobytes()).decode('utf-8')
             await self._send_json(websocket, {"type": "audio_chunk", "data": encoded_chunk})
         await self._send_json(websocket, {"type": "status", "data": "Listening..."})
 
+    def _convert_audio(self, webm_data: bytes) -> bytes:
+        """Converts WebM/Opus audio data from browser to raw PCM for VAD."""
+        try:
+            audio = AudioSegment.from_file(io.BytesIO(webm_data), format="webm")
+            audio = audio.set_frame_rate(self.sample_rate).set_channels(1).set_sample_width(2)
+            return audio.raw_data
+        except Exception as e:
+            print(f"Pydub conversion error: {e}")
+            return b''
+
     async def handle_audio_stream(self, websocket: WebSocket):
-        # VAD state
-        silence_threshold_ms = 700  # 0.7 seconds of silence
-        padding_ms = 200 # Add a bit of audio padding
+        silence_threshold_ms = 700
+        padding_ms = 200
         num_padding_chunks = padding_ms // self.frame_duration
         num_silence_chunks = silence_threshold_ms // self.frame_duration
 
@@ -112,34 +119,44 @@ class RealTimeS2SAgent:
 
         while True:
             try:
-                data = await websocket.receive_bytes()
-                is_speech = self.vad.is_speech(data, self.sample_rate)
+                webm_data = await websocket.receive_bytes()
+                
+                # **THE CRITICAL FIX IS HERE**
+                # Convert the incoming webm audio to raw PCM before processing
+                pcm_data = await asyncio.to_thread(self._convert_audio, webm_data)
 
-                if is_speech:
-                    if not is_speaking:
-                        is_speaking = True
-                        # Add padding frames to the start of speech
-                        voiced_frames.extend([f for f, _ in padding_buffer])
-                    voiced_frames.append(data)
-                    voice_buffer.clear()
-                else:
-                    padding_buffer.append((data, is_speech))
-                    if is_speaking:
-                        voice_buffer.append(data)
-                        if len(voice_buffer) >= num_silence_chunks:
-                            # End of speech detected
-                            is_speaking = False
-                            audio_data = b''.join(voiced_frames)
-                            asyncio.create_task(self._process_s2s_pipeline(websocket, audio_data))
-                            # Reset buffers
-                            voiced_frames.clear()
-                            voice_buffer.clear()
-                            padding_buffer.clear()
+                if not pcm_data:
+                    continue
+
+                # Now, process the raw PCM data in chunks for the VAD
+                for i in range(0, len(pcm_data), self.chunk_size * 2): # 2 bytes per sample
+                    chunk = pcm_data[i:i + self.chunk_size * 2]
+                    if len(chunk) != self.chunk_size * 2:
+                        continue # Skip incomplete chunks
+
+                    is_speech = self.vad.is_speech(chunk, self.sample_rate)
+                    
+                    if is_speech:
+                        if not is_speaking:
+                            is_speaking = True
+                            voiced_frames.extend([f for f, _ in padding_buffer])
+                        voiced_frames.append(chunk)
+                        voice_buffer.clear()
+                    else:
+                        padding_buffer.append((chunk, is_speech))
+                        if is_speaking:
+                            voice_buffer.append(chunk)
+                            if len(voice_buffer) >= num_silence_chunks:
+                                is_speaking = False
+                                audio_data = b''.join(voiced_frames)
+                                asyncio.create_task(self._process_s2s_pipeline(websocket, audio_data))
+                                voiced_frames.clear()
+                                voice_buffer.clear()
+                                padding_buffer.clear()
             except Exception as e:
                 print(f"Connection closed or error: {e}")
                 break
 
-# Instantiate agent
 agent = RealTimeS2SAgent()
 
 @app.get("/")
