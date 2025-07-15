@@ -1,0 +1,28 @@
+# Core AI/ML
+torch==2.3.0
+torchaudio==2.3.0
+
+# Speech-to-Text (STT)
+faster-whisper==1.0.2
+ctranslate2==4.3.1
+
+# Language Model (LLM)
+# Note: 'transformers' is installed from git in commands.txt
+accelerate==0.30.1
+bitsandbytes==0.43.1
+huggingface_hub==0.23.0
+
+# Text-to-Speech (TTS)
+TTS==0.22.0
+
+# Real-time Web Backend
+fastapi==0.111.0
+uvicorn==0.29.0
+websockets==12.0
+python-multipart==0.0.9
+
+# Audio I/O and Utilities
+pyaudio==0.2.14
+numpy==1.22.0
+webrtcvad==2.0.10
+soundfile==0.12.1
