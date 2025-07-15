@@ -6,8 +6,9 @@ torchaudio==2.3.0
 faster-whisper==1.0.2
 ctranslate2==4.3.1
 
-# Language Model (LLM)
-# Note: 'transformers' is installed from git in commands.txt
+# Language Model (LLM) & TTS Compatibility
+# This version is critical. It's before the breaking change that removed .generate()
+transformers==4.41.2
 accelerate==0.30.1
 bitsandbytes==0.43.1
 huggingface_hub==0.23.0
@@ -23,6 +24,7 @@ python-multipart==0.0.9
 
 # Audio I/O and Utilities
 pyaudio==0.2.14
-numpy==1.22.0
+numpy==1.22.0 # Required by TTS==0.22.0
 webrtcvad==2.0.10
 soundfile==0.12.1
+pydub==0.25.1
